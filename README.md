@@ -156,13 +156,12 @@ Deconstructs target text into atomic claims using a 3-sentence context window.
 ```
 
 [Prev Sentence] + [Target Sentence] + [Next Sentence]
-│
-▼
-Model: fact-extractor-1.7b
-│
-▼
-["Atomic Fact 1", "Atomic Fact 2", ...]
-
+                          │
+                          ▼
+               Model: fact-extractor-1.7b
+                          │
+                          ▼
+        ["Atomic Fact 1", "Atomic Fact 2", ...]
 ```
 
 > `fact-extractor-1.7b` is trained on surrounding sentences to resolve pronouns (like "it" or "he") while preserving the core claim.
@@ -212,8 +211,6 @@ Pivot Query      Attribute Query   Boolean Query
      ▼                 ▼                 ▼
 "Tim Cook"       "CEO of Apple"    "Is Tim Cook the
                                     CEO of Apple?"
-
-
 ```
 
 #### How Generated Queries Are Used Downstream

@@ -16,13 +16,13 @@
   "fact-extractor": {
     "url": "https://huggingface.co/adrianmm12/fact-extractor-1.7b/resolve/main/fact-extractor-1.7b-q8_0.gguf",
     "system_prompt": "Extract atomic facts from the target.",
-    "params": { "threads": 8, "parallel": 4, "temperature": 0.1, "repetition_penalty": 1.1, "max_tokens": 256 },
+    "params": { "threads": 8, "parallel": 2, "temperature": 0.1, "repetition_penalty": 1.1, "max_tokens": 256 },
     "type": "generative"
   },
   "query-generator": {
     "url": "https://huggingface.co/adrianmm12/Qwen-1.5B-Query-Generator/resolve/main/query-generator-1.5b-Q8_0.gguf",
     "system_prompt": "Generate retrieval queries for the provided atomic fact.",
-    "params": { "threads": 8, "temperature": 0.1, "repetition_penalty": 1.1, "max_tokens": 150 },
+    "params": { "threads": 8, "parallel": 2, "temperature": 0.2, "repetition_penalty": 1.1, "max_tokens": 150 },
     "type": "generative"
   },
   "fact-judge": {
