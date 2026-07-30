@@ -1,19 +1,33 @@
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from mangum import Mangum
 
 app = FastAPI()
 LLAMA_URL = "http://127.0.0.1:8081"
 
 class EmbeddingPayload(BaseModel):
     content: str
-    model_path: str
+
+@app.get("/ping")
+async def ping():
+    return {"status": "ok"}
+
+@app.post("/invocations")
+async def invocations(payload: EmbeddingPayload):
+    async with httpx.AsyncClient() as client:
+        try:
+            r = await client.post(f"{LLAMA_URL}/completion", json={
+                "prompt": payload.content,
+                "n_predict": 0,
+                "embedding": True
+            }, timeout=30.0)
+            return r.json()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/embed-query")
 async def embed_query(payload: EmbeddingPayload):
     async with httpx.AsyncClient() as client:
-        # Standard llama-server uses /completion for embedding via n_predict: 0
         r = await client.post(f"{LLAMA_URL}/completion", json={
             "prompt": f"search_query: {payload.content}",
             "n_predict": 0,
@@ -34,9 +48,6 @@ async def embed_doc(payload: EmbeddingPayload):
 @app.post("/token/count")
 async def token_count(payload: EmbeddingPayload):
     async with httpx.AsyncClient() as client:
-        # Standard llama-server /tokenize endpoint
         r = await client.post(f"{LLAMA_URL}/tokenize", json={"content": payload.content})
         tokens = r.json().get("tokens", [])
         return {"token_count": len(tokens)}
-
-handler = Mangum(app)

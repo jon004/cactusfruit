@@ -23,9 +23,9 @@ Unified deployment utility for building and pushing LocalDoby module containers.
 Options:
   --modules [names...]  Specify one or more modules to process (e.g., --modules pipeline embedder reranker)
   --all-modules         Automatically select all models defined in models.json plus pipeline
-  --profile [name]      Select deployment profile from deploy-to.json (default: "default")
+  --profile [name]      Select deployment profile from deploy-to.json (default: "dev")
   --build               Build Docker images for specified modules
-  --push                Push built images to ECR repositories
+  --push                Push built images to ECR repositories (disabled if profile is "dev" or not found in deploy-to.json)
   --purge-docker        Clean up Docker build cache (runs before processing)
   -h, --help            Show this help message and exit
 
@@ -35,20 +35,20 @@ Available Models in $MODELS_JSON:
 
 Workflow:
   1. Validates module existence and directory presence.
-  2. Builds container images (using specific build args for models, or standard build for pipeline).
-  3. Pushes images to AWS ECR across configured regions with 'latest' and timestamp tags.
+  2. Builds container images (passing MODELS_CONFIG and MODEL_ASSETS build args/environment variables).
+  3. Pushes images to AWS ECR across configured regions with 'latest' and timestamp tags (skipped if profile is "dev").
 
 Example:
-  ./deploy.sh --build --push --modules pipeline embedder --purge-docker
+  ./deploy.sh --build --modules pipeline embedder --purge-docker
 EOF
     exit 0
 }
 
-# Default state
+# Default state (changed default profile to "dev" so push won't break if flag is omitted)
 BUILD_ENABLED=false
 PUSH_ENABLED=false
 PURGE_ENABLED=false
-PROFILE="default"
+PROFILE=""
 SELECTED_MODULES=()
 
 # Parse Args
@@ -75,6 +75,11 @@ while [[ "$#" -gt 0 ]]; do
     esac
     shift
 done
+
+# If profile flag is not set, default to "dev"
+if [[ -z "$PROFILE" ]]; then
+    PROFILE="dev"
+fi
 
 # Pre-flight checks
 command -v docker >/dev/null 2>&1 || error_exit "Docker is not installed."
@@ -115,11 +120,17 @@ if [[ ${#SELECTED_MODULES[@]} -eq 0 ]]; then
     error_exit "No modules specified. Use --modules or --all-modules."
 fi
 
-if ! python3 -c "import json; exit(0 if '$PROFILE' in json.load(open('$DEPLOY_JSON')) else 1)"; then
-    error_exit "Profile '$PROFILE' not found in $DEPLOY_JSON."
+# Profile validation and safe handling for "dev" profile
+REGIONS=""
+if [[ "$PROFILE" == "dev" ]]; then
+    echo "Profile is set to 'dev'. Pushing to ECR is disabled for this profile."
+    PUSH_ENABLED=false
+else
+    if ! python3 -c "import json; exit(0 if '$PROFILE' in json.load(open('$DEPLOY_JSON')) else 1)"; then
+        error_exit "Profile '$PROFILE' not found in $DEPLOY_JSON."
+    fi
+    REGIONS=$(python3 -c "import json; print(' '.join(json.load(open('$DEPLOY_JSON'))['$PROFILE']['aws_regions']))")
 fi
-
-REGIONS=$(python3 -c "import json; print(' '.join(json.load(open('$DEPLOY_JSON'))['$PROFILE']['aws_regions']))")
 
 if [[ "$PURGE_ENABLED" == true ]]; then
     echo "Purging build cache..."
@@ -157,6 +168,7 @@ for mod_name in "${SELECTED_MODULES[@]}"; do
             docker build \
                 -t "${IMAGE_TAG}:${BASE_IMAGE_TAG}" \
                 -t "${IMAGE_TAG}:${IMAGE_TAG_TIMESTAMP}" \
+                --build-arg ENV="$PROFILE" \
                 -f "modules/pipeline/Dockerfile" . || error_exit "Build failed for $mod_name."
         else
             MODEL_CONFIG_JSON=$(python3 -c "import json; print(json.dumps(json.load(open('$MODELS_JSON'))['$mod_name']))")
@@ -167,6 +179,8 @@ for mod_name in "${SELECTED_MODULES[@]}"; do
                 -t "${IMAGE_TAG}:${IMAGE_TAG_TIMESTAMP}" \
                 --build-arg MODEL_CONFIG="$MODEL_CONFIG_JSON" \
                 --build-arg MODEL_ASSETS="$ASSETS_JSON" \
+                --build-arg MODELS_JSON="$MODEL_CONFIG_JSON" \
+                --build-arg ENV="$PROFILE" \
                 -f "modules/$MODEL_TYPE/Dockerfile" . || error_exit "Build failed for $mod_name."
         fi
     fi
