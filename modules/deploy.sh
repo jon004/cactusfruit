@@ -144,23 +144,23 @@ BASE_IMAGE_TAG="latest"
 for mod_name in "${SELECTED_MODULES[@]}"; do
     echo "Processing: $mod_name"
     
-    # 1. Validate configuration and directory (now under modules/)
+    # 1. Validate configuration and directory
     if [[ "$mod_name" == "pipeline" ]]; then
-        [[ -d "modules/pipeline" ]] || error_exit "Directory 'modules/pipeline' does not exist."
+        [[ -d "pipeline" ]] || error_exit "Directory 'pipeline' does not exist."
         MODEL_TYPE="pipeline"
         ECR_REPO="$PIPELINE_ECR_REPO"
     else
         [[ -f "$MODELS_JSON" ]] || error_exit "$MODELS_JSON not found."
         MODEL_TYPE=$(python3 -c "import json; print(json.load(open('$MODELS_JSON')).get('$mod_name', {}).get('type', ''))")
         [[ -z "$MODEL_TYPE" ]] && error_exit "Model '$mod_name' not defined in $MODELS_JSON."
-        [[ -d "modules/$MODEL_TYPE" ]] || error_exit "Directory 'modules/$MODEL_TYPE' does not exist."
+        [[ -d "$MODEL_TYPE" ]] || error_exit "Directory '$MODEL_TYPE' does not exist."
         ECR_REPO="$mod_name"
     fi
     
     # 2. Extract metadata
-    IMAGE_TAG="localdoby:$mod_name"
+    IMAGE_TAG="localdoby/$mod_name"
 
-    # 3. Build only if enabled (pointing to modules/ path)
+    # 3. Build only if enabled (pointing to / path)
     if [[ "$BUILD_ENABLED" == true ]]; then
         echo "Building $mod_name..."
         
@@ -169,7 +169,7 @@ for mod_name in "${SELECTED_MODULES[@]}"; do
                 -t "${IMAGE_TAG}:${BASE_IMAGE_TAG}" \
                 -t "${IMAGE_TAG}:${IMAGE_TAG_TIMESTAMP}" \
                 --build-arg ENV="$PROFILE" \
-                -f "modules/pipeline/Dockerfile" . || error_exit "Build failed for $mod_name."
+                -f "pipeline/Dockerfile" . || error_exit "Build failed for $mod_name."
         else
             MODEL_CONFIG_JSON=$(python3 -c "import json; print(json.dumps(json.load(open('$MODELS_JSON'))['$mod_name']))")
             ASSETS_JSON=$(python3 -c "import json; print(json.dumps(json.load(open('$MODELS_JSON'))['$mod_name'].get('assets', {})))")
@@ -181,7 +181,7 @@ for mod_name in "${SELECTED_MODULES[@]}"; do
                 --build-arg MODEL_ASSETS="$ASSETS_JSON" \
                 --build-arg MODELS_JSON="$MODEL_CONFIG_JSON" \
                 --build-arg ENV="$PROFILE" \
-                -f "modules/$MODEL_TYPE/Dockerfile" . || error_exit "Build failed for $mod_name."
+                -f "$MODEL_TYPE/Dockerfile" . || error_exit "Build failed for $mod_name."
         fi
     fi
 

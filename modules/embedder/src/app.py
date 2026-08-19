@@ -1,9 +1,10 @@
-import httpx
+# appEmbedder.py
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from Embedder import Embedder
 
 app = FastAPI()
-LLAMA_URL = "http://127.0.0.1:8081"
+embedder = Embedder()
 
 class EmbeddingPayload(BaseModel):
     content: str
@@ -14,40 +15,32 @@ async def ping():
 
 @app.post("/invocations")
 async def invocations(payload: EmbeddingPayload):
-    async with httpx.AsyncClient() as client:
-        try:
-            r = await client.post(f"{LLAMA_URL}/completion", json={
-                "prompt": payload.content,
-                "n_predict": 0,
-                "embedding": True
-            }, timeout=30.0)
-            return r.json()
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+    try:
+        vector = embedder.embed_document(payload.content)
+        return {"embedding": vector}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/embed-query")
 async def embed_query(payload: EmbeddingPayload):
-    async with httpx.AsyncClient() as client:
-        r = await client.post(f"{LLAMA_URL}/completion", json={
-            "prompt": f"search_query: {payload.content}",
-            "n_predict": 0,
-            "embedding": True
-        })
-        return r.json()
+    try:
+        vector = embedder.embed_query(payload.content)
+        return {"embedding": vector}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/embed-doc")
 async def embed_doc(payload: EmbeddingPayload):
-    async with httpx.AsyncClient() as client:
-        r = await client.post(f"{LLAMA_URL}/completion", json={
-            "prompt": f"search_document: {payload.content}",
-            "n_predict": 0,
-            "embedding": True
-        })
-        return r.json()
+    try:
+        vector = embedder.embed_document(payload.content)
+        return {"embedding": vector}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/token/count")
 async def token_count(payload: EmbeddingPayload):
-    async with httpx.AsyncClient() as client:
-        r = await client.post(f"{LLAMA_URL}/tokenize", json={"content": payload.content})
-        tokens = r.json().get("tokens", [])
-        return {"token_count": len(tokens)}
+    try:
+        count = embedder.token_count(payload.content)
+        return {"token_count": count}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
