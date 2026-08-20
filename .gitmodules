@@ -1,0 +1,11 @@
+[submodule "llmserver/external/llama.cpp"]
+	path = llmserver/external/llama.cpp
+	url = https://github.com/ggml-org/llama.cpp.git
+
+[submodule "llmserver/external/json"]
+	path = llmserver/external/json
+	url = https://github.com/nlohmann/json.git
+[submodule "llmserver/external/cpp-httplib"]
+	path = llmserver/external/cpp-httplib
+	url = https://github.com/yhirose/cpp-httplib.git
+
