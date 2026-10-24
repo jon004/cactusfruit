@@ -163,6 +163,16 @@ message history and a snapshot of the conversation state are kept; requesting
 that model again restores the full conversation. A swap costs a weights
 reload from disk, not the conversation.
 
+**Eviction is automatic — `/m/release/memory` is optional.** You never need
+to call it to reclaim memory: requesting a different model (or any embedder
+request) implicitly frees the current one. It exists for when you want to be
+explicit, e.g. guaranteeing headroom between pipeline phases.
+
+Like an implicit swap, `/m/release/memory` also **preserves conversations** —
+it frees weights and the KV cache from VRAM, but each model's message history
+and state snapshot are retained, so the next request for that model reloads
+the weights and picks the conversation back up where it left off.
+
 ## Context management
 
 Each `model_path` owns an independent, stateful session:
