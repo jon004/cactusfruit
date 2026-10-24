@@ -1,77 +1,211 @@
 # LLM Server
 
-A high-performance LLM inference server with CUDA and Metal acceleration support.
+A custom C++ inference server built on `llama.cpp`, designed for a strict memory
+budget (target: < 4 GB) while providing features the upstream `llama-server`
+does not:
 
-## Building
+- **Per-model conversation state** — chat history and KV-cache context are
+  retained across requests for each model, with incremental evaluation of only
+  the new tokens per turn.
+- **Sequential model pooling** — exactly one model is resident at a time;
+  switching models frees the previous one without losing its conversation.
+- **Vision (multimodal) support** — images are evaluated alongside text via a
+  model's vision projector (`mmproj`), through the same API.
+- **Text embeddings and token counting** — exposed as endpoints for retrieval
+  and chunking pipelines.
 
-### Quick Start
+CUDA (Linux/NVIDIA) and Metal (Apple Silicon) acceleration are supported; the
+build script auto-detects Metal on macOS.
 
-Choose one of the following methods:
+---
 
-#### Method 1: Build Only (`build.sh`)
-Use this if you already have dependencies installed and just want to compile the project.
+## Contents
+- [Build](#build)
+- [Getting models](#getting-models)
+- [Run](#run)
+- [API summary](#api-summary)
+- [Example requests](#example-requests)
+- [Model lifecycle & memory pooling](#model-lifecycle--memory-pooling)
+- [Context management](#context-management)
+- [Vision notes](#vision-notes)
+- [Manual testing client](#manual-testing-client)
+- [Requirements](#requirements)
+
+---
+
+## Build
 
 ```bash
 ./build.sh
 ```
 
-**Flags:**
-- `--force` - Force rebuild even if already built
+`build.sh` does everything: initializes git submodules (`llama.cpp`, `nlohmann/json`, `cpp-httplib`), detects hardware acceleration, and compiles with CMake. The resulting binary is at:
 
-**What it does:**
-- Detects system resources (CPU cores, RAM)
-- Automatically enables CUDA or Metal acceleration based on available hardware
-- Builds the project in parallel using optimal job count
-- Creates executable at `build/llm-server`
-
-#### Method 2: Full Install (`install.sh`)
-Use this for a complete setup including dependencies and model downloads.
-
-```bash
-./install.sh
-```
-
-**Flags:**
-- `--force` - Force re-download models even if they exist
-- `--skip-model` - Skip model downloads (build only)
-
-**What it does:**
-- Initializes git submodules
-- Installs dependencies (macOS: brew, cmake, curl, brotli)
-- Detects and configures acceleration (CUDA/Metal)
-- Downloads pre-trained models:
-  - 7B chat model (~4.1GB)
-  - Small 0.5B model (~470MB) 
-  - Embedding model (~80MB)
-- Configures CMake build
-
-## Acceleration Support
-
-The build system automatically detects and enables hardware acceleration:
-
-- **CUDA**: Enabled if `nvcc` compiler is found
-- **Metal**: Enabled on macOS (Apple Silicon and Intel)
-
-## System Requirements
-
-- **Linux/macOS**: Build scripts tested on Linux and macOS
-- **CMake**: Required for building
-- **Memory**: 4GB+ RAM recommended for parallel builds
-- **Storage**: ~5GB for models (if using install.sh)
-
-## Output
-
-After building, the executable will be located at:
 ```
 build/llm-server
 ```
 
-## Example Usage
+Flags:
+
+| Flag | Effect |
+| --- | --- |
+| `--cuda` | Enable CUDA acceleration (Linux/NVIDIA) |
+| `--debug` | Build in Debug mode |
+| `-h`, `--help` | Show help |
+
+On macOS, Metal acceleration is enabled automatically. The multimodal library
+(`mtmd`) needed for vision is built via `LLAMA_BUILD_MTMD` in `CMakeLists.txt`;
+no extra configuration is required.
+
+> The server does **not** download models and has no model registry — every
+> request names a model file path, and the server loads it on demand.
+
+## Getting models
+
+Models are GGUF files placed manually. A `models/` directory works well (it is
+git-ignored). Validated example — Qwen3.5-4B with vision:
 
 ```bash
-# Start the server with default model
-./build/llm-server
-
-# Start with specific model
-./build/llm-server --model models/7b-chatml-model.gguf
+mkdir -p models
+# text model (~2.5 GB, Q4_K_M)
+curl -L -C - -o models/Qwen3.5-4B-Q4_K_M.gguf \
+  https://huggingface.co/lmstudio-community/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf
+# vision projector (~644 MB) — only needed for image input
+curl -L -C - -o models/mmproj-Qwen3.5-4B-BF16.gguf \
+  https://huggingface.co/lmstudio-community/Qwen3.5-4B-GGUF/resolve/main/mmproj-Qwen3.5-4B-BF16.gguf
 ```
+
+Any GGUF supported by the bundled `llama.cpp` works — the chat template is read
+from the GGUF itself, so no template configuration is needed.
+
+## Run
+
+```bash
+./build/llm-server
+```
+
+- Binds to **`127.0.0.1:8287`** (localhost only). Override with `--port <n>` / `-p <n>`.
+- Nothing is loaded at startup; models load lazily on first request that names them.
+- The server processes **one request at a time**; concurrent requests receive `429 Server Busy`.
+
+## API summary
+
+All request/response bodies are JSON. Full schemas: [`API_DOCUMENTATION.md`](API_DOCUMENTATION.md).
+
+| Endpoint | Method | Purpose |
+| --- | --- | --- |
+| `/m/prompt` | POST | Send a message and generate a completion (stateful per model) |
+| `/m/prompt/image` | POST | Same, with a base64 image evaluated alongside the text |
+| `/m/prefill` | POST | Seed message history without generating |
+| `/m/read/context` | POST | Dump current conversation history as JSON |
+| `/m/reset/context` | POST | Clear history and context for a model |
+| `/m/release/memory` | POST | Hard reset — free all model/embedder VRAM |
+| `/m/embed-query` | POST | Embedding of a search query |
+| `/m/embed-doc` | POST | Embedding of a document |
+| `/m/token/count` | POST | Token count of a text |
+| `/m/status` | GET | Whether the server is currently busy |
+
+Common request fields: `model_path` (required — local GGUF path),
+`n_ctx` (context window, default `2048`), `n_gpu_layers` (default `100`),
+`chat_template` (optional override; otherwise read from the GGUF), plus
+sampling parameters (`temperature`, `top_p`, `top_k`, `repetition_penalty`,
+`max_new_tokens`, ...).
+
+## Example requests
+
+Text:
+
+```bash
+curl -s localhost:8287/m/prompt -d '{
+  "model_path": "models/Qwen3.5-4B-Q4_K_M.gguf",
+  "role": "user",
+  "content": "Give me a one-sentence summary of the tundra.",
+  "n_ctx": 4096
+}'
+# -> {"response": "..."}
+```
+
+Vision (`image` is base64; a `data:...;base64,` prefix is also tolerated):
+
+```bash
+IMG=$(base64 -i photo.jpg)
+curl -s localhost:8287/m/prompt/image -d "{
+  \"model_path\":  \"models/Qwen3.5-4B-Q4_K_M.gguf\",
+  \"mmproj_path\": \"models/mmproj-Qwen3.5-4B-BF16.gguf\",
+  \"role\":        \"user\",
+  \"content\":     \"Describe this image in one sentence.\",
+  \"image\":      \"$IMG\",
+  \"n_ctx\":       8192,
+  \"temperature\": 0.0
+}"
+# -> {"response": "..."}
+```
+
+## Model lifecycle & memory pooling
+
+Exactly **one model is resident at a time** (generator XOR embedder), keeping
+the hardware footprint bounded:
+
+- **Sequential calls on the same `model_path`**: cache hit — the model stays
+  loaded and nothing is reloaded between calls.
+- **Requesting a different `model_path`**: the current model's weights are
+  released and the new one is loaded.
+- **Embedder requests** (`/m/embed-query`, `/m/embed-doc`,
+  `/m/token/count`) also evict a resident generator — the model is loaded in
+  embedder mode instead. The next generation request pays a reload. Avoid
+  interleaving token counts between generation calls when latency matters.
+- **Changing `n_ctx` or `n_gpu_layers`** on the same model forces a reload
+  with the new configuration.
+- **`/m/release/memory`**: explicit hard reset, freeing all weights.
+
+**Conversations survive model swaps.** When a generator is evicted, its
+message history and a snapshot of the conversation state are kept; requesting
+that model again restores the full conversation. A swap costs a weights
+reload from disk, not the conversation.
+
+## Context management
+
+Each `model_path` owns an independent, stateful session:
+
+- **History accumulation** — every `/m/prompt` (or `/m/prompt/image`) appends
+  the user message and the assistant reply; the KV cache persists between
+  calls.
+- **Incremental evaluation** — each call only tokenizes and evaluates the
+  *new* tokens since the previous turn, not the whole history.
+- **State snapshots** — the conversation state is captured after every
+  generation and restored whenever the context is recreated (model swap,
+  config change).
+- **`/m/prefill`** seeds history without generating; **`/m/read/context`**
+  inspects it; **`/m/reset/context`** clears the session for that model.
+- **Changing `n_ctx` mid-session** rebuilds the context; the message history
+  is re-prefilled on the next call.
+- **Context overflow** fails the request with an error (HTTP 500) rather than
+  silently truncating — size `n_ctx` accordingly.
+
+## Vision notes
+
+- Requires a vision-capable text model plus its `mmproj` projector file; both
+  paths are passed per request.
+- The projector loads lazily on the first vision request only — text-only
+  traffic never touches it.
+- Images consume context tokens (hundreds to ~1.5k depending on resolution);
+  use a larger `n_ctx` (e.g. `8192`).
+- Supported image formats: jpg, png, bmp, gif.
+- Thinking models (e.g. Qwen3.5) emit `<think>...</think>` reasoning traces in
+  `response` before the answer — this is expected behavior, not an error.
+
+## Manual testing client
+
+[`manualtesting/`](manualtesting/) contains an interactive Python chat client.
+Note: its default `base_url` is `http://localhost:8080`, which is wrong for
+this server — point it at `http://localhost:8287` (or start the server with
+`--port 8080`).
+
+## Requirements
+
+- **macOS or Linux** (Metal auto-enabled on macOS; CUDA via `--cuda`)
+- **git** (submodules), **CMake ≥ 3.24**, C/C++ toolchain
+- RAM sized to your model + context (e.g. Qwen3.5-4B Q4_K_M runs
+  comfortably within 8 GB unified memory)
+- Disk: models are fetched manually — plan for their size (~2.5 GB for the
+  example text model)
