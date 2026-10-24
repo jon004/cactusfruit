@@ -37,6 +37,7 @@ private:
 
     // Handlers
     void handlePostPrompt(const httplib::Request& req, httplib::Response& res);
+    void handlePostPromptImage(const httplib::Request& req, httplib::Response& res);
     void handlePostPrefill(const httplib::Request& req, httplib::Response& res);
     void handlePostContext(const httplib::Request& req, httplib::Response& res);
     void handlePostReleaseMemory(const httplib::Request& req, httplib::Response& res);

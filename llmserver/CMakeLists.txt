@@ -69,6 +69,8 @@ set(BUILD_SHARED_LIBS OFF CACHE BOOL "Enforce static linkage rules across third-
 set(LLAMA_SERVER OFF CACHE BOOL "Disable upstream native server bin matching" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "Disable example applications binary compilation" FORCE)
 set(LLAMA_BUILD_TESTS OFF CACHE BOOL "Disable testing framework dependencies" FORCE)
+# Build only the mtmd multimodal library (vision support) without the rest of the tools
+set(LLAMA_BUILD_MTMD ON CACHE BOOL "llama: build tools/mtmd library standalone" FORCE)
 
 # === SPEED OPTIMIZATION: PRUNE CUDA TEMPLATE MATRIX ===
 set(GGML_CUDA_FORCE_F16 ON CACHE BOOL "Compile optimized FP16 paths" FORCE)
@@ -92,6 +94,7 @@ set(SERVER_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/core/LlamaEmbedder.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/core/LlamaGenerator.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/LlamaVision.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/core/ModelMemoryManager.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/core/Prompter.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/core/Server.cpp"
@@ -112,6 +115,7 @@ endif()
 target_link_libraries(llm-server 
     PRIVATE 
     llama
+    mtmd
     ggml
     CURL::libcurl
 )
@@ -143,4 +147,5 @@ target_include_directories(llm-server
     ${CMAKE_CURRENT_SOURCE_DIR}/external/cpp-httplib
     ${CMAKE_CURRENT_SOURCE_DIR}/external/llama.cpp/include
     ${CMAKE_CURRENT_SOURCE_DIR}/external/llama.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/llama.cpp/tools/mtmd
 )

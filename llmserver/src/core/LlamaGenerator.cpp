@@ -1,4 +1,5 @@
 #include "core/LlamaGenerator.h"
+#include "core/LlamaVision.h"
 
 #include <iostream>
 #include <algorithm>
@@ -40,6 +41,7 @@ void LlamaGenerator::load() {
 
 void LlamaGenerator::release() {
     std::lock_guard<std::mutex> lock(mtx_);
+    vision.reset(); // bound to the text model, must be released first
     if (model) {
         llama_model_free(model);
         model = nullptr;
@@ -103,7 +105,53 @@ std::string LlamaGenerator::generate(llama_context *ctx, const std::string& prom
         }
     }
 
-    // 3. Dynamic Request-Scoped Sampler Setup wrapped safely
+    return runSamplingLoop(ctx, params, on_token, prompt_tokens);
+}
+
+// --- Vision (multimodal) support ---
+
+bool LlamaGenerator::initVision(const std::string& mmproj_path) {
+    if (mmproj_path.empty()) {
+        throw std::invalid_argument("mmproj path cannot be empty!");
+    }
+    if (!model) {
+        throw std::runtime_error("Cannot initialize vision before the text model is loaded: " + model_path);
+    }
+
+    if (vision && vision->isLoaded() && vision->getPath() == mmproj_path) {
+        return true; // same projector already bound
+    }
+
+    vision = std::make_unique<LlamaVision>(mmproj_path, model);
+    vision->load();
+    return true;
+}
+
+bool LlamaGenerator::hasVision() const {
+    return vision && vision->isLoaded();
+}
+
+const char* LlamaGenerator::visionMarker() const {
+    return vision ? vision->getMarker() : nullptr;
+}
+
+std::string LlamaGenerator::generateWithImage(llama_context *ctx, const std::string& prompt, const std::vector<uint8_t>& image_bytes, const SamplingParams& params, TokenCallback on_token) {
+    if (!ctx) throw std::runtime_error("generateWithImage(): ctx cannot be null");
+    if (prompt.empty()) throw std::runtime_error("generateWithImage(): prompt cannot be empty");
+    if (image_bytes.empty()) throw std::invalid_argument("generateWithImage(): image data cannot be empty");
+    if (!hasVision()) throw std::runtime_error("generateWithImage(): vision projector not initialized (call initVision first)");
+
+    // Decode image, tokenize prompt with the media marker, evaluate all chunks
+    // (the text tokens come back as a sampler penalty baseline)
+    std::vector<llama_token> penalty_baseline = vision->evalPrompt(ctx, prompt, image_bytes);
+
+    return runSamplingLoop(ctx, params, on_token, penalty_baseline);
+}
+
+std::string LlamaGenerator::runSamplingLoop(llama_context* ctx, const SamplingParams& params, TokenCallback on_token, const std::vector<llama_token>& penalty_baseline) {
+    const int n_ctx = llama_n_ctx(ctx);
+
+    // 1. Dynamic Request-Scoped Sampler Setup wrapped safely
     struct SamplerDeleter {
         void operator()(llama_sampler* s) const { if (s) llama_sampler_free(s); }
     };
@@ -129,11 +177,11 @@ std::string LlamaGenerator::generate(llama_context *ctx, const std::string& prom
     llama_sampler_chain_add(smpl.get(), llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
 
     // CRITICAL: Feed historical prompt tokens into the sampler to establish penalty baseline
-    for (const auto& token : prompt_tokens) {
+    for (const auto& token : penalty_baseline) {
         llama_sampler_accept(smpl.get(), token);
     }
 
-    // 4. Generation Loop
+    // 2. Generation Loop
     llama_token new_token_id;
     std::string response;
     int32_t tokens_generated = 0;
@@ -250,4 +298,6 @@ void LlamaGenerator::moveFrom(LlamaGenerator&& other) noexcept {
     model_path = std::move(other.model_path);
     chat_template = std::move(other.chat_template);
     n_gpu_layers = other.n_gpu_layers;
+
+    vision = std::move(other.vision);
 }

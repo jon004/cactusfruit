@@ -95,4 +95,21 @@
 * **Request Body**: None
 * **Response (JSON)**:
   * `status`: Boolean value (`true` if busy, `false` otherwise)[cite: 6].
+
+---
+
+### 10. Generate Prompt with Image (`POST /m/prompt/image`)
+* **Description**: Appends a message with an attached image to the chat history and generates a completion. The image is evaluated alongside the text via the model's vision projector (mmproj). The image consumes context tokens (typically hundreds to ~1.5k depending on resolution); use a larger `n_ctx` accordingly.
+* **Request Body (JSON)**:
+  * `model_path` *(string, required)*: File path to the Llama text model (GGUF).
+  * `mmproj_path` *(string, required)*: File path to the vision projector (GGUF).
+  * `role` *(string, required)*: The role of the message author (e.g., `"user"`).
+  * `content` *(string, required)*: The text content of the message.
+  * `image` *(string, required)*: The image, base64-encoded (jpg/png/bmp/gif; a `data:...;base64,` prefix is tolerated).
+  * `chat_template` *(string, optional)*: Custom Jinja template for chat formatting.
+  * `n_gpu_layers` *(int, optional)*: Number of layers to offload to the GPU (default: `100`).
+  * `n_ctx` *(int, optional)*: Context window size (default: `2048`; recommend `8192` for images).
+  * Sampling parameters *(optional)*: same as `POST /m/prompt`.
+* **Response (JSON)**:
+  * `response`: The generated text response from the model.
   

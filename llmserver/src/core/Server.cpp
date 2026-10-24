@@ -1,5 +1,48 @@
 #include "core/Server.h"
 #include <iostream>
+#include <string_view>
+#include <cstdint>
+
+// Decodes base64 (with optional data-URI prefix) into raw bytes.
+// Returns false on invalid input; whitespace is ignored.
+static bool base64Decode(const std::string& in, std::vector<uint8_t>& out) {
+    auto val = [](char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+
+    // strip a data-URI prefix, e.g. "data:image/png;base64,"
+    std::string_view s(in);
+    auto comma = s.find(',');
+    if (s.substr(0, 5) == "data:" && comma != std::string_view::npos) {
+        s = s.substr(comma + 1);
+    }
+
+    out.clear();
+    out.reserve(s.size() / 4 * 3);
+
+    uint32_t buf = 0;
+    int bits = 0;
+    int pad = 0;
+    for (char c : s) {
+        if (c == '\n' || c == '\r' || c == ' ' || c == '\t') continue;
+        if (c == '=') { pad++; continue; }
+        if (pad > 0) return false; // data after padding
+        int v = val(c);
+        if (v < 0) return false;    // invalid character
+        buf = (buf << 6) | static_cast<uint32_t>(v);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back(static_cast<uint8_t>((buf >> bits) & 0xFF));
+        }
+    }
+    return !out.empty();
+}
 
 Server::Server() = default;
 
@@ -9,6 +52,7 @@ void Server::loadResourcesAndRoutes() {
 
 void Server::loadRoutes() {
     svr.Post("/m/prompt",         [this](auto& req, auto& res) { handlePostPrompt(req, res); });
+    svr.Post("/m/prompt/image",   [this](auto& req, auto& res) { handlePostPromptImage(req, res); });
     svr.Post("/m/prefill",        [this](auto& req, auto& res) { handlePostPrefill(req, res); });
     svr.Post("/m/read/context",   [this](auto& req, auto& res) { handlePostContext(req, res); });
     svr.Post("/m/embed-query",    [this](auto& req, auto& res) { handlePostEmbedQuery(req, res); });
@@ -42,6 +86,40 @@ void Server::handlePostPrompt(const httplib::Request& req, httplib::Response& re
         SamplingParams parameters = SamplingParams::from_json(body);
         
         std::string response = agent->generate(body.at("role"), body.at("content"), parameters);
+        res.set_content(json({{"response", response}}).dump(), "application/json");
+    });
+}
+
+void Server::handlePostPromptImage(const httplib::Request& req, httplib::Response& res) {
+    executeWithLock(res, [&]() {
+        json body = json::parse(req.body);
+
+        int n_gpu_layers = body.value("n_gpu_layers", 100);
+        int n_ctx = body.value("n_ctx", 2048);
+
+        Prompter* agent = memory_manager.getPrompter(
+            body.at("model_path"),
+            body.value("chat_template", ""),
+            true,
+            n_gpu_layers,
+            n_ctx
+        );
+
+        // Decode the base64 image (jpg/png/bmp/gif; data-URI prefix tolerated)
+        std::vector<uint8_t> image_bytes;
+        if (!base64Decode(body.at("image").get<std::string>(), image_bytes)) {
+            throw std::invalid_argument("Invalid or empty base64 image data");
+        }
+
+        SamplingParams parameters = SamplingParams::from_json(body);
+
+        std::string response = agent->generateWithImage(
+            body.at("role"),
+            body.at("content"),
+            image_bytes,
+            body.at("mmproj_path"),
+            parameters
+        );
         res.set_content(json({{"response", response}}).dump(), "application/json");
     });
 }
