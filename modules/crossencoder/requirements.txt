@@ -1,4 +1,4 @@
-fastapi
-uvicorn
+fastapi>=0.100.0
+uvicorn>=0.22.0
 sentence-transformers
 torch

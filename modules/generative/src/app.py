@@ -1,78 +1,93 @@
-# appGenerative.py
+
 import asyncio
-import os
 import json
+import logging
+import os
+
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from Generator import Generator
+from pydantic import BaseModel, Field
+from cactusfruit.sdk import LlmServerClient
 
-app = FastAPI()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-generator = Generator()
+app = FastAPI(title="CactusFruit Generative Service")
 
-SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT")
-MODEL_NAME = os.getenv("MODEL_NAME")
-MODEL_PARAMS_STR = os.getenv("MODEL_PARAMS", "{}")
 
-if not SYSTEM_PROMPT or not MODEL_NAME:
-    raise RuntimeError("CRITICAL: SYSTEM_PROMPT or MODEL_NAME environment variable is not set.")
+def load_config():
+    system_prompt = os.getenv("SYSTEM_PROMPT")
+    model_name = os.getenv("MODEL_NAME")
+    llm_server_url = os.getenv("LLM_SERVER_URL")
 
-# Parse the params injected by deploy.sh
-try:
-    PARAMS = json.loads(MODEL_PARAMS_STR)
-except json.JSONDecodeError:
-    PARAMS = {}
+    if not system_prompt:
+        raise RuntimeError("SYSTEM_PROMPT must be configured.")
 
-# Map model parameters for generation requests
-GENERATION_PARAMS = {
-    "n_predict": PARAMS.get("max_tokens", 256),
-    "temperature": PARAMS.get("temperature", 0.1),
-    "repeat_penalty": PARAMS.get("repetition_penalty", 1.1)
-}
+    if not model_name:
+        raise RuntimeError("MODEL_NAME must be configured.")
 
-queue = asyncio.Queue()
-BATCH_WINDOW = 0.05
-MAX_BATCH_SIZE = 4
+    if not llm_server_url:
+        raise RuntimeError("LLM_SERVER_URL must be configured.")
+
+    try:
+        params = json.loads(os.getenv("MODEL_PARAMS", "{}"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "MODEL_PARAMS must contain valid JSON."
+        ) from exc
+
+    if not isinstance(params, dict):
+        raise RuntimeError("MODEL_PARAMS must be a JSON object.")
+
+    generation_params = {
+        "n_predict": params.get("max_tokens", 256),
+        "temperature": params.get("temperature", 0.1),
+        "repeat_penalty": params.get("repetition_penalty", 1.1),
+    }
+
+    return system_prompt, model_name, llm_server_url, generation_params
+
+
+SYSTEM_PROMPT, MODEL_NAME, LLM_SERVER_URL, GENERATION_PARAMS = load_config()
+
+# Connect to the LLM server configured for this model in models.json.
+llm_client = LlmServerClient(base_url=LLM_SERVER_URL)
+
 
 class InferencePayload(BaseModel):
-    prompt: str
+    prompt: str = Field(min_length=1)
 
-@app.on_event("startup")
-async def startup():
-    asyncio.create_task(batch_worker())
 
 @app.get("/ping")
 async def ping():
-    return {"status": "ok", "model": MODEL_NAME}
+    return {
+        "status": "ok",
+        "model": MODEL_NAME,
+        "llm_server": LLM_SERVER_URL,
+    }
+
 
 @app.post("/invocations")
 async def invocations(payload: InferencePayload):
-    loop = asyncio.get_event_loop()
-    future = loop.create_future()
-    await queue.put((payload.prompt, future))
-    return await future
-
-async def batch_worker():
-    while True:
-        batch = []
-        try:
-            item = await asyncio.wait_for(queue.get(), timeout=BATCH_WINDOW)
-            batch.append(item)
-        except asyncio.TimeoutError:
-            continue
-        while len(batch) < MAX_BATCH_SIZE and not queue.empty():
-            batch.append(queue.get_nowait())
-        await process_batch(batch)
-
-async def process_batch(batch):
-    await asyncio.gather(
-        *[call_generator(prompt, f) for prompt, f in batch],
-        return_exceptions=True
+    # The current generate() call accepts a single role/content pair.
+    # Include the configured instructions in the request text.
+    full_prompt = (
+        f"Instructions:\n{SYSTEM_PROMPT}\n\n"
+        f"User input:\n{payload.prompt}"
     )
 
-async def call_generator(prompt, future):
     try:
-        response_text = generator.generate(role="user", content=prompt, params=GENERATION_PARAMS)
-        future.set_result({"content": response_text})
-    except Exception as e:
-        future.set_exception(e)
+        response_text = await asyncio.to_thread(
+            llm_client.generate,
+            role="user",
+            content=full_prompt,
+            params=GENERATION_PARAMS,
+        )
+
+        return {"content": response_text}
+
+    except Exception:
+        logger.exception("Generation request failed")
+        raise HTTPException(
+            status_code=502,
+            detail="The model generation request failed.",
+        ) from None

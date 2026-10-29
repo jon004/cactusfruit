@@ -1,62 +1,108 @@
+# syntax=docker/dockerfile:1.4
 FROM ubuntu:22.04 AS builder
+
 ARG MODEL_CONFIG
-ARG MODEL_ASSETS
-ARG ENVIRONMENT="local"
+ARG ENV=dev
 
 WORKDIR /build
 
-RUN apt-get update && apt-get install -y build-essential cmake git python3 curl
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential cmake git python3 curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
-# Only build open-source llama-server if ENVIRONMENT is not local or dev
-RUN if [ "$ENVIRONMENT" != "local" ] && [ "$ENVIRONMENT" != "dev" ]; then \
-        git clone https://github.com/ggerganov/llama.cpp && \
-        cd llama.cpp && cmake -B build && cmake --build build --config Release; \
+# Build llama.cpp only for profiles using an embedded model server.
+RUN if [ "$ENV" != "dev" ] && [ "$ENV" != "local" ]; then \
+        git clone --depth 1 https://github.com/ggml-org/llama.cpp \
+        && cmake -S llama.cpp -B llama.cpp/build \
+            -DCMAKE_BUILD_TYPE=Release \
+        && cmake --build llama.cpp/build --config Release -j2; \
     else \
-        echo "Skipping open-source llama.cpp build because ENVIRONMENT is set to '$ENVIRONMENT'."; \
+        echo "Skipping llama.cpp build for $ENV"; \
     fi
 
-RUN mkdir -p /models && \
-    python3 -c "import json, subprocess; config = json.loads('$MODEL_CONFIG'); \
-    subprocess.run(['curl', '-L', config['url'], '-o', '/models/model.gguf'])"
+# Download the configured GGUF model for embedded-server profiles.
+RUN if [ "$ENV" != "dev" ] && [ "$ENV" != "local" ]; then \
+        MODEL_CONFIG="$MODEL_CONFIG" python3 -c \
+        'import json, os, urllib.request; c=json.loads(os.environ["MODEL_CONFIG"]); urllib.request.urlretrieve(c["url"], "/tmp/model.gguf")' \
+        && mkdir -p /models \
+        && mv /tmp/model.gguf /models/model.gguf; \
+    else \
+        echo "Skipping model download for $ENV"; \
+    fi
+
 
 FROM python:3.12-slim
-ARG ENVIRONMENT="local"
-RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+
+ARG ENV=dev
+
+ENV ENVIRONMENT=${ENV}
+ENV ENV_FILE_PATH=/app/.env
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY embedder/requirements.txt .
+COPY embedder/requirements.txt ./requirements.txt
+
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Conditionally copy the open-source llama-server and models only if not local/dev
+COPY embedder/src/app.py ./app.py
+
+# Copy llama-server and the downloaded model only when required.
 RUN --mount=type=bind,from=builder,source=/build,target=/tmp/builder \
-    if [ "$ENVIRONMENT" != "local" ] && [ "$ENVIRONMENT" != "dev" ]; then \
-        cp /tmp/builder/llama.cpp/build/bin/llama-server /usr/local/bin/llama-server && \
-        chmod +x /usr/local/bin/llama-server && \
-        cp -r /tmp/builder/models /models; \
+    if [ "$ENV" != "dev" ] && [ "$ENV" != "local" ]; then \
+        install -m 0755 \
+            /tmp/builder/llama.cpp/build/bin/llama-server \
+            /usr/local/bin/llama-server \
+        && mkdir -p /models \
+        && cp /tmp/builder/models/model.gguf /models/model.gguf; \
     else \
-        echo "Skipping llama-server and model copy for local/dev environment."; \
+        echo "No embedded model server for $ENV"; \
     fi
-
-COPY embedder/src/app.py .
-COPY ../shared-libs/embedder.py .
-
-ARG MODEL_CONFIG
-
-RUN python3 -c "
-import json
-config = json.loads('''$MODEL_CONFIG''')
-params = config.get('params', {})
-with open('/app/.env', 'w') as f:
-    f.write(f'THREADS={params.get(\"threads\", 4)}\n')
-"
-
-ENV THREADS=""
-ENV ENVIRONMENT=${ENVIRONMENT}
-
-HEALTHCHECK --interval=30s --timeout=5s \
-  CMD curl -f http://127.0.0.1:8081/health || exit 1
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "set -a && [ -f /app/.env ] && . /app/.env && set +a && if [ \"$ENVIRONMENT\" != \"local\" ] && [ \"$ENVIRONMENT\" != \"dev\" ]; then llama-server -m /models/model.gguf --host 127.0.0.1 --port 8081 --threads ${THREADS:-4} --embedding & fi uvicorn app:app --host 0.0.0.0 --port 8000"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
+    CMD curl -fsS http://127.0.0.1:8000/ping || exit 1
+
+CMD ["sh", "-c", "\
+    if [ -n \"${MODEL_CONFIG:-}\" ]; then \
+        export MODEL_CONFIG_ARG=\"$MODEL_CONFIG\"; \
+    fi; \
+    python -m cactusfruit.dockerscripts.configloader \
+    && set -a \
+    && . /app/.env \
+    && set +a \
+    && if [ \"$ENVIRONMENT\" != \"dev\" ] && [ \"$ENVIRONMENT\" != \"local\" ]; then \
+        export LLM_SERVER_URL=http://127.0.0.1:8081; \
+        llama-server \
+            -m /models/model.gguf \
+            --host 127.0.0.1 \
+            --port 8081 \
+            --threads \"${THREADS:-4}\" \
+            --embedding & \
+        server_pid=$!; \
+        ready=0; \
+        for attempt in $(seq 1 60); do \
+            if curl -fsS http://127.0.0.1:8081/health >/dev/null; then \
+                ready=1; \
+                break; \
+            fi; \
+            if ! kill -0 \"$server_pid\" 2>/dev/null; then \
+                echo 'llama-server exited during startup'; \
+                exit 1; \
+            fi; \
+            sleep 1; \
+        done; \
+        if [ \"$ready\" -ne 1 ]; then \
+            echo 'llama-server did not become ready'; \
+            exit 1; \
+        fi; \
+    fi; \
+    exec uvicorn app:app --host 0.0.0.0 --port 8000 \
+"]
