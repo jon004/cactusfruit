@@ -60,6 +60,56 @@ std::string Prompter::generate(const std::string& role, const std::string& conte
     return response;
 }
 
+std::string Prompter::generateWithImage(const std::string& role, const std::string& content, const std::vector<uint8_t>& image_bytes, const std::string& mmproj_path, const SamplingParams& params) {
+    load();
+    if (!ctx) {
+        throw std::runtime_error("LLaMA context is not initialized");
+    }
+    if (content.empty()) {
+        throw std::invalid_argument("Prompt content must not be empty");
+    }
+    if (role.empty()) {
+        throw std::invalid_argument("Prompt role must not be empty");
+    }
+    if (image_bytes.empty()) {
+        throw std::invalid_argument("Image data must not be empty");
+    }
+    if (content.length() > 10000) {
+        throw std::invalid_argument("Prompt content is too long.");
+    }
+    if (role.length() > 25) {
+        throw std::invalid_argument("Prompt role is too long.");
+    }
+
+    llm.initVision(mmproj_path);
+    const char* marker = llm.visionMarker();
+    if (!marker) {
+        throw std::runtime_error("Vision projector did not provide a media marker");
+    }
+
+    // The marker tells mtmd_tokenize where to swap in the image embeddings
+    std::string content_with_media = content + " " + marker;
+
+    message_history.push_back({ role, content_with_media });
+    messagePreProcessing(message_history[message_history.size() - 1]);
+
+    std::vector<llama_chat_message> temp_messages;
+    temp_messages.reserve(message_history.size());
+    for (const auto& msg : message_history) {
+        temp_messages.push_back(to_llama_chat_message(msg));
+    }
+    std::string prompt = messagesToPrompt(temp_messages, true);
+
+    std::string response = llm.generateWithImage(ctx.get(), prompt, image_bytes, params);
+
+    message_history.push_back({ "assistant", response });
+    temp_messages.push_back(to_llama_chat_message(message_history.back()));
+    prev_templatized_chat_size = llm.chatTemplateSize(temp_messages);
+
+    this->saveState();
+    return response;
+}
+
 std::string Prompter::chatToJson() const {
     std::stringstream ss;
     ss << "{\"messages\": [";

@@ -5,6 +5,7 @@
 #include <functional>   
 #include <stdexcept>    
 #include <mutex>        
+#include <memory>
 #include "llama.h"
 #include <nlohmann/json.hpp> 
 
@@ -40,6 +41,8 @@ struct SamplingParams {
     }
 };
 
+class LlamaVision;
+
 class LlamaGenerator {
 public:
     using TokenCallback = std::function<void(const std::string&)>;
@@ -58,6 +61,11 @@ public:
     LlamaGenerator& operator=(LlamaGenerator&& other) noexcept;
 
     std::string generate(llama_context *ctx, const std::string& prompt, const SamplingParams& params = SamplingParams(), TokenCallback on_token = nullptr);
+
+    bool initVision(const std::string& mmproj_path);
+    bool hasVision() const;
+    const char* visionMarker() const;
+    std::string generateWithImage(llama_context *ctx, const std::string& prompt, const std::vector<uint8_t>& image_bytes, const SamplingParams& params = SamplingParams(), TokenCallback on_token = nullptr);
 
     void prefill(llama_context *ctx, const std::string &prompt);
 
@@ -80,7 +88,8 @@ public:
 private:
     mutable std::mutex mtx_;
     const llama_vocab* vocab = nullptr;   
-    int n_gpu_layers = 100; // Represents offloading everything to GPU (equivalent to device_map="auto")
-
+    int n_gpu_layers = 100;
+    std::unique_ptr<LlamaVision> vision;
+    std::string runSamplingLoop(llama_context* ctx, const SamplingParams& params, TokenCallback on_token, const std::vector<llama_token>& penalty_baseline);
     void moveFrom(LlamaGenerator&& other) noexcept;
 };

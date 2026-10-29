@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <iostream>
 #include <utility>
+#include <cstdint>
 
 #include "llama.h"
 #include "core/LlamaGenerator.h"
@@ -24,6 +25,8 @@ public:
     Prompter& operator=(const Prompter&) = delete;
     
     std::string generate(const std::string& role, const std::string& content, const SamplingParams& params = SamplingParams());
+
+    std::string generateWithImage(const std::string& role, const std::string& content, const std::vector<uint8_t>& image_bytes, const std::string& mmproj_path, const SamplingParams& params = SamplingParams());
     
     std::string chatToJson() const;
     void resetContext();

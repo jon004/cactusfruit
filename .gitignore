@@ -1,3 +1,4 @@
 .terraform
 .terraform.lock.hcl
 deploy-to.json
+llmserver/models/
