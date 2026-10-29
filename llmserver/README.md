@@ -10,9 +10,10 @@ does not:
 - **Sequential model pooling** — exactly one model is resident at a time;
   switching models frees the previous one without losing its conversation.
 - **Vision (multimodal) support** — images are evaluated alongside text via a
-  model's vision projector (`mmproj`), through the same API.
+  model's vision projector (`mmproj`), ingested via high-performance raw binary streams (`application/octet-stream`).
 - **Text embeddings and token counting** — exposed as endpoints for retrieval
   and chunking pipelines.
+- **Universal Header & JSON Support** — configuration parameters can be passed flexibly via JSON bodies or custom HTTP headers (`X-Model-Path`, `X-N-Gpu-Layers`, `X-N-Ctx`, `X-Chat-Template`, etc.).
 
 CUDA (Linux/NVIDIA) and Metal (Apple Silicon) acceleration are supported; the
 build script auto-detects Metal on macOS.
@@ -63,16 +64,16 @@ no extra configuration is required.
 ## Getting models
 
 Models are GGUF files placed manually. A `models/` directory works well (it is
-git-ignored). Validated example — Qwen3.5-4B with vision:
+git-ignored). Validated example — Qwen2.5-VL-3B with vision:
 
 ```bash
 mkdir -p models
-# text model (~2.5 GB, Q4_K_M)
-curl -L -C - -o models/Qwen3.5-4B-Q4_K_M.gguf \
-  https://huggingface.co/lmstudio-community/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf
-# vision projector (~644 MB) — only needed for image input
-curl -L -C - -o models/mmproj-Qwen3.5-4B-BF16.gguf \
-  https://huggingface.co/lmstudio-community/Qwen3.5-4B-GGUF/resolve/main/mmproj-Qwen3.5-4B-BF16.gguf
+# text model (~2.3 GB, Q4_K_M)
+curl -L -C - -o models/Qwen2.5-VL-3B-Instruct.Q4_K_M.gguf \
+  https://huggingface.co/unsloth/Qwen2.5-VL-3B-Instruct-GGUF/resolve/main/Qwen2.5-VL-3B-Instruct.Q4_K_M.gguf
+# vision projector (~1.1 GB) — only needed for image input
+curl -L -C - -o models/Qwen2.5-VL-3B-Instruct-mmproj-fp16.gguf \
+  https://huggingface.co/unsloth/Qwen2.5-VL-3B-Instruct-GGUF/resolve/main/Qwen2.5-VL-3B-Instruct-mmproj-fp16.gguf
 ```
 
 Any GGUF supported by the bundled `llama.cpp` works — the chat template is read
@@ -90,12 +91,12 @@ from the GGUF itself, so no template configuration is needed.
 
 ## API summary
 
-All request/response bodies are JSON. Full schemas: [`API_DOCUMENTATION.md`](API_DOCUMENTATION.md).
+All request/response bodies can be JSON or configured via custom HTTP headers (`X-Model-Path`, `X-N-Ctx`, `X-N-Gpu-Layers`, etc.). Full schemas: [`API_DOCUMENTATION.md`](API_DOCUMENTATION.md).
 
 | Endpoint | Method | Purpose |
 | --- | --- | --- |
 | `/m/prompt` | POST | Send a message and generate a completion (stateful per model) |
-| `/m/prompt/image` | POST | Same, with a base64 image evaluated alongside the text |
+| `/m/prompt/image` | POST | Vision completion via raw binary stream (`application/octet-stream`) and HTTP headers |
 | `/m/prefill` | POST | Seed message history without generating |
 | `/m/read/context` | POST | Dump current conversation history as JSON |
 | `/m/reset/context` | POST | Clear history and context for a model |
@@ -105,19 +106,19 @@ All request/response bodies are JSON. Full schemas: [`API_DOCUMENTATION.md`](API
 | `/m/token/count` | POST | Token count of a text |
 | `/m/status` | GET | Whether the server is currently busy |
 
-Common request fields: `model_path` (required — local GGUF path),
-`n_ctx` (context window, default `2048`), `n_gpu_layers` (default `100`),
+Common request configuration fields: `model_path` (required — local GGUF path, or via `X-Model-Path`),
+`n_ctx` (context window, default `2048`, or via `X-N-Ctx`), `n_gpu_layers` (default `100`, or via `X-N-Gpu-Layers`),
 `chat_template` (optional override; otherwise read from the GGUF), plus
 sampling parameters (`temperature`, `top_p`, `top_k`, `repetition_penalty`,
 `max_new_tokens`, ...).
 
 ## Example requests
 
-Text:
+Text (using JSON body):
 
 ```bash
 curl -s localhost:8287/m/prompt -d '{
-  "model_path": "models/Qwen3.5-4B-Q4_K_M.gguf",
+  "model_path": "models/Qwen2.5-VL-3B-Instruct.Q4_K_M.gguf",
   "role": "user",
   "content": "Give me a one-sentence summary of the tundra.",
   "n_ctx": 4096
@@ -125,19 +126,17 @@ curl -s localhost:8287/m/prompt -d '{
 # -> {"response": "..."}
 ```
 
-Vision (`image` is base64; a `data:...;base64,` prefix is also tolerated):
+Vision (using raw binary stream (`application/octet-stream`) and HTTP headers):
 
 ```bash
-IMG=$(base64 -i photo.jpg)
-curl -s localhost:8287/m/prompt/image -d "{
-  \"model_path\":  \"models/Qwen3.5-4B-Q4_K_M.gguf\",
-  \"mmproj_path\": \"models/mmproj-Qwen3.5-4B-BF16.gguf\",
-  \"role\":        \"user\",
-  \"content\":     \"Describe this image in one sentence.\",
-  \"image\":      \"$IMG\",
-  \"n_ctx\":       8192,
-  \"temperature\": 0.0
-}"
+curl -X POST http://127.0.0.1:8287/m/prompt/image \
+  -H "X-Model-Path: models/Qwen2.5-VL-3B-Instruct.Q4_K_M.gguf" \
+  -H "X-Mmproj-Path: models/Qwen2.5-VL-3B-Instruct-mmproj-fp16.gguf" \
+  -H "X-Role: user" \
+  -H "X-Prompt: Describe this image in one sentence." \
+  -H "X-N-Ctx: 8192" \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary "@photo.jpg"
 # -> {"response": "..."}
 ```
 
@@ -201,8 +200,7 @@ Each `model_path` owns an independent, stateful session:
 - Images consume context tokens (hundreds to ~1.5k depending on resolution);
   use a larger `n_ctx` (e.g. `8192`).
 - Supported image formats: jpg, png, bmp, gif.
-- Thinking models (e.g. Qwen3.5) emit `<think>...</think>` reasoning traces in
-  `response` before the answer — this is expected behavior, not an error.
+- High-performance binary streaming (`application/octet-stream`) avoids Base64 overhead completely.
 
 ## Manual testing client
 
@@ -215,7 +213,7 @@ this server — point it at `http://localhost:8287` (or start the server with
 
 - **macOS or Linux** (Metal auto-enabled on macOS; CUDA via `--cuda`)
 - **git** (submodules), **CMake ≥ 3.24**, C/C++ toolchain
-- RAM sized to your model + context (e.g. Qwen3.5-4B Q4_K_M runs
+- RAM sized to your model + context (e.g. Qwen2.5-VL-3B Q4_K_M runs
   comfortably within 8 GB unified memory)
-- Disk: models are fetched manually — plan for their size (~2.5 GB for the
+- Disk: models are fetched manually — plan for their size (~2.3 GB for the
   example text model)

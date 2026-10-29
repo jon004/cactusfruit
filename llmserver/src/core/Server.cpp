@@ -3,47 +3,6 @@
 #include <string_view>
 #include <cstdint>
 
-// Decodes base64 (with optional data-URI prefix) into raw bytes.
-// Returns false on invalid input; whitespace is ignored.
-static bool base64Decode(const std::string& in, std::vector<uint8_t>& out) {
-    auto val = [](char c) -> int {
-        if (c >= 'A' && c <= 'Z') return c - 'A';
-        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-        if (c >= '0' && c <= '9') return c - '0' + 52;
-        if (c == '+') return 62;
-        if (c == '/') return 63;
-        return -1;
-    };
-
-    // strip a data-URI prefix, e.g. "data:image/png;base64,"
-    std::string_view s(in);
-    auto comma = s.find(',');
-    if (s.substr(0, 5) == "data:" && comma != std::string_view::npos) {
-        s = s.substr(comma + 1);
-    }
-
-    out.clear();
-    out.reserve(s.size() / 4 * 3);
-
-    uint32_t buf = 0;
-    int bits = 0;
-    int pad = 0;
-    for (char c : s) {
-        if (c == '\n' || c == '\r' || c == ' ' || c == '\t') continue;
-        if (c == '=') { pad++; continue; }
-        if (pad > 0) return false; // data after padding
-        int v = val(c);
-        if (v < 0) return false;    // invalid character
-        buf = (buf << 6) | static_cast<uint32_t>(v);
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            out.push_back(static_cast<uint8_t>((buf >> bits) & 0xFF));
-        }
-    }
-    return !out.empty();
-}
-
 Server::Server() = default;
 
 void Server::loadResourcesAndRoutes() {
@@ -68,16 +27,47 @@ bool Server::listen(int port) {
     return svr.listen("127.0.0.1", port);
 }
 
+// Helper utility to parse JSON safely if body is present, otherwise return empty json
+static json parse_json_body_safe(const std::string& body_str) {
+    if (body_str.empty()) return json::object();
+    try {
+        return json::parse(body_str);
+    } catch (...) {
+        return json::object();
+    }
+}
+
 void Server::handlePostPrompt(const httplib::Request& req, httplib::Response& res) {
     executeWithLock(res, [&]() {
-        json body = json::parse(req.body);
-        
-        int n_gpu_layers = body.value("n_gpu_layers", 100);
-        int n_ctx = body.value("n_ctx", 2048);
+        json body = parse_json_body_safe(req.body);
+
+        std::string model_path = req.has_header("X-Model-Path") 
+            ? req.get_header_value("X-Model-Path") 
+            : body.at("model_path").get<std::string>();
+
+        std::string chat_template = req.has_header("X-Chat-Template") 
+            ? req.get_header_value("X-Chat-Template") 
+            : body.value("chat_template", "");
+
+        int n_gpu_layers = req.has_header("X-N-Gpu-Layers") 
+            ? std::stoi(req.get_header_value("X-N-Gpu-Layers")) 
+            : body.value("n_gpu_layers", 100);
+
+        int n_ctx = req.has_header("X-N-Ctx") 
+            ? std::stoi(req.get_header_value("X-N-Ctx")) 
+            : body.value("n_ctx", 2048);
+
+        std::string role = req.has_header("X-Role") 
+            ? req.get_header_value("X-Role") 
+            : body.at("role").get<std::string>();
+
+        std::string content = req.has_header("X-Prompt") 
+            ? req.get_header_value("X-Prompt") 
+            : body.at("content").get<std::string>();
 
         Prompter* agent = memory_manager.getPrompter(
-            body.at("model_path"), 
-            body.value("chat_template", ""), 
+            model_path, 
+            chat_template, 
             true,
             n_gpu_layers,
             n_ctx
@@ -85,39 +75,54 @@ void Server::handlePostPrompt(const httplib::Request& req, httplib::Response& re
         
         SamplingParams parameters = SamplingParams::from_json(body);
         
-        std::string response = agent->generate(body.at("role"), body.at("content"), parameters);
+        std::string response = agent->generate(role, content, parameters);
         res.set_content(json({{"response", response}}).dump(), "application/json");
     });
 }
 
 void Server::handlePostPromptImage(const httplib::Request& req, httplib::Response& res) {
     executeWithLock(res, [&]() {
-        json body = json::parse(req.body);
-
-        int n_gpu_layers = body.value("n_gpu_layers", 100);
-        int n_ctx = body.value("n_ctx", 2048);
+        if (!req.has_header("X-Model-Path") || !req.has_header("X-Mmproj-Path") || 
+            !req.has_header("X-Role") || !req.has_header("X-Prompt")) {
+            throw std::invalid_argument("Missing required headers: X-Model-Path, X-Mmproj-Path, X-Role, X-Prompt");
+        }
+        std::string model_path = req.get_header_value("X-Model-Path");
+        std::string mmproj_path = req.get_header_value("X-Mmproj-Path");
+        std::string role = req.get_header_value("X-Role");
+        std::string prompt = req.get_header_value("X-Prompt");
+        int n_gpu_layers = req.has_header("X-N-Gpu-Layers") 
+            ? std::stoi(req.get_header_value("X-N-Gpu-Layers")) 
+            : 100;
+        int n_ctx = req.has_header("X-N-Ctx") 
+            ? std::stoi(req.get_header_value("X-N-Ctx")) 
+            : 2048;
+        std::string chat_template = req.has_header("X-Chat-Template") 
+            ? req.get_header_value("X-Chat-Template") 
+            : "";
 
         Prompter* agent = memory_manager.getPrompter(
-            body.at("model_path"),
-            body.value("chat_template", ""),
+            model_path,
+            chat_template,
             true,
             n_gpu_layers,
             n_ctx
         );
 
-        // Decode the base64 image (jpg/png/bmp/gif; data-URI prefix tolerated)
-        std::vector<uint8_t> image_bytes;
-        if (!base64Decode(body.at("image").get<std::string>(), image_bytes)) {
-            throw std::invalid_argument("Invalid or empty base64 image data");
+        if (req.body.empty()) {
+            throw std::invalid_argument("Request body cannot be empty");
         }
 
-        SamplingParams parameters = SamplingParams::from_json(body);
+        std::vector<uint8_t> image_bytes(req.body.begin(), req.body.end());
+        if (image_bytes.empty()) {
+            throw std::invalid_argument("Invalid or empty image data payload");
+        }
 
+        SamplingParams parameters;
         std::string response = agent->generateWithImage(
-            body.at("role"),
-            body.at("content"),
+            role,
+            prompt,
             image_bytes,
-            body.at("mmproj_path"),
+            mmproj_path,
             parameters
         );
         res.set_content(json({{"response", response}}).dump(), "application/json");
@@ -126,24 +131,36 @@ void Server::handlePostPromptImage(const httplib::Request& req, httplib::Respons
 
 void Server::handlePostPrefill(const httplib::Request& req, httplib::Response& res) {
     executeWithLock(res, [&]() {
-        json body = json::parse(req.body);
-        
-        int n_gpu_layers = body.value("n_gpu_layers", 100);
-        int n_ctx = body.value("n_ctx", 2048);
+        json body = parse_json_body_safe(req.body); 
+
+        std::string model_path = req.has_header("X-Model-Path") 
+            ? req.get_header_value("X-Model-Path") 
+            : body.at("model_path").get<std::string>();
+
+        std::string chat_template = req.has_header("X-Chat-Template") 
+            ? req.get_header_value("X-Chat-Template") 
+            : body.value("chat_template", "");
+
+        int n_gpu_layers = req.has_header("X-N-Gpu-Layers") 
+            ? std::stoi(req.get_header_value("X-N-Gpu-Layers")) 
+            : body.value("n_gpu_layers", 100);
+
+        int n_ctx = req.has_header("X-N-Ctx") 
+            ? std::stoi(req.get_header_value("X-N-Ctx")) 
+            : body.value("n_ctx", 2048);
 
         Prompter* agent = memory_manager.getPrompter(
-            body.at("model_path"), 
-            body.value("chat_template", ""), 
+            model_path, 
+            chat_template, 
             true,
             n_gpu_layers,
             n_ctx
         );
-        
+
         std::vector<std::pair<std::string, std::string>> history;
         for (auto& item : body.at("messages")) {
             history.push_back({item.at("role"), item.at("content")});
         }
-        
         agent->prefill(history);
         res.set_content(json({{"status", "success"}}).dump(), "application/json");
     });
@@ -151,66 +168,116 @@ void Server::handlePostPrefill(const httplib::Request& req, httplib::Response& r
 
 void Server::handlePostContext(const httplib::Request& req, httplib::Response& res) {
     executeWithLock(res, [&]() {
-        json body = json::parse(req.body);
-        
-        int n_gpu_layers = body.value("n_gpu_layers", 100);
-        int n_ctx = body.value("n_ctx", 2048);
+        json body = parse_json_body_safe(req.body);
 
-        // load_to_vram = false (peek without unloading GPU)
+        std::string model_path = req.has_header("X-Model-Path") 
+            ? req.get_header_value("X-Model-Path") 
+            : body.at("model_path").get<std::string>();
+
+        std::string chat_template = req.has_header("X-Chat-Template") 
+            ? req.get_header_value("X-Chat-Template") 
+            : body.value("chat_template", "");
+
+        int n_gpu_layers = req.has_header("X-N-Gpu-Layers") 
+            ? std::stoi(req.get_header_value("X-N-Gpu-Layers")) 
+            : body.value("n_gpu_layers", 100);
+
+        int n_ctx = req.has_header("X-N-Ctx") 
+            ? std::stoi(req.get_header_value("X-N-Ctx")) 
+            : body.value("n_ctx", 2048);
+
         Prompter* agent = memory_manager.getPrompter(
-            body.at("model_path"), 
-            body.value("chat_template", ""), 
+            model_path, 
+            chat_template, 
             false,
             n_gpu_layers,
             n_ctx
         );
-        
         res.set_content(agent->chatToJson(), "application/json");
     });
 }
 
 void Server::handlePostEmbedQuery(const httplib::Request& req, httplib::Response& res) {
     executeWithLock(res, [&]() {
-        json body = json::parse(req.body);
-        LlamaEmbedder* emb = memory_manager.getEmbedder(body.at("model_path"));
-        auto vec = emb->embedSearchQuery(body.at("content"));
+        json body = parse_json_body_safe(req.body);
+
+        std::string model_path = req.has_header("X-Model-Path") 
+            ? req.get_header_value("X-Model-Path") 
+            : body.at("model_path").get<std::string>();
+
+        std::string content = req.has_header("X-Content") 
+            ? req.get_header_value("X-Content") 
+            : body.at("content").get<std::string>();
+
+        LlamaEmbedder* emb = memory_manager.getEmbedder(model_path);
+        auto vec = emb->embedSearchQuery(content);
         res.set_content(json({{"embedding", vec}}).dump(), "application/json");
     });
 }
 
 void Server::handlePostEmbedDocument(const httplib::Request& req, httplib::Response& res) {
     executeWithLock(res, [&]() {
-        json body = json::parse(req.body);
-        LlamaEmbedder* emb = memory_manager.getEmbedder(body.at("model_path"));
-        auto vec = emb->embedDocument(body.at("content"));
+        json body = parse_json_body_safe(req.body);
+
+        std::string model_path = req.has_header("X-Model-Path") 
+            ? req.get_header_value("X-Model-Path") 
+            : body.at("model_path").get<std::string>();
+
+        std::string content = req.has_header("X-Content") 
+            ? req.get_header_value("X-Content") 
+            : body.at("content").get<std::string>();
+
+        LlamaEmbedder* emb = memory_manager.getEmbedder(model_path);
+        auto vec = emb->embedDocument(content);
         res.set_content(json({{"embedding", vec}}).dump(), "application/json");
     });
 }
 
 void Server::handlePostTokenCount(const httplib::Request& req, httplib::Response& res) {
     executeWithLock(res, [&]() {
-        json body = json::parse(req.body);
-        LlamaEmbedder* emb = memory_manager.getEmbedder(body.at("model_path"));
-        int token_count = emb->getTokenCount(body.at("content"));
+        json body = parse_json_body_safe(req.body);
+
+        std::string model_path = req.has_header("X-Model-Path") 
+            ? req.get_header_value("X-Model-Path") 
+            : body.at("model_path").get<std::string>();
+
+        std::string content = req.has_header("X-Content") 
+            ? req.get_header_value("X-Content") 
+            : body.at("content").get<std::string>();
+
+        LlamaEmbedder* emb = memory_manager.getEmbedder(model_path);
+        int token_count = emb->getTokenCount(content);
         res.set_content(json({{"token_count", token_count}}).dump(), "application/json");
     });
 }
 
 void Server::handlePostResetContext(const httplib::Request& req, httplib::Response& res) {
     executeWithLock(res, [&]() {
-        json body = json::parse(req.body);
-        
-        int n_gpu_layers = body.value("n_gpu_layers", 100);
-        int n_ctx = body.value("n_ctx", 2048);
+        json body = parse_json_body_safe(req.body);
+
+        std::string model_path = req.has_header("X-Model-Path") 
+            ? req.get_header_value("X-Model-Path") 
+            : body.at("model_path").get<std::string>();
+
+        std::string chat_template = req.has_header("X-Chat-Template") 
+            ? req.get_header_value("X-Chat-Template") 
+            : body.value("chat_template", "");
+
+        int n_gpu_layers = req.has_header("X-N-Gpu-Layers") 
+            ? std::stoi(req.get_header_value("X-N-Gpu-Layers")) 
+            : body.value("n_gpu_layers", 100);
+
+        int n_ctx = req.has_header("X-N-Ctx") 
+            ? std::stoi(req.get_header_value("X-N-Ctx")) 
+            : body.value("n_ctx", 2048);
 
         Prompter* agent = memory_manager.getPrompter(
-            body.at("model_path"), 
-            body.value("chat_template", ""), 
+            model_path, 
+            chat_template, 
             false,
             n_gpu_layers,
             n_ctx
         );
-
         agent->resetContext();
         res.set_content("VRAM Cleared for model", "text/plain");
     });

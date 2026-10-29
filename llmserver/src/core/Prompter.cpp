@@ -81,7 +81,6 @@ std::string Prompter::generateWithImage(const std::string& role, const std::stri
         throw std::invalid_argument("Prompt role is too long.");
     }
 
-    // Bind the vision projector to the text model (no-op if already bound)
     llm.initVision(mmproj_path);
     const char* marker = llm.visionMarker();
     if (!marker) {

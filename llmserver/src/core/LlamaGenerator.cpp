@@ -41,7 +41,7 @@ void LlamaGenerator::load() {
 
 void LlamaGenerator::release() {
     std::lock_guard<std::mutex> lock(mtx_);
-    vision.reset(); // bound to the text model, must be released first
+    vision.reset();
     if (model) {
         llama_model_free(model);
         model = nullptr;
@@ -119,7 +119,7 @@ bool LlamaGenerator::initVision(const std::string& mmproj_path) {
     }
 
     if (vision && vision->isLoaded() && vision->getPath() == mmproj_path) {
-        return true; // same projector already bound
+        return true;
     }
 
     vision = std::make_unique<LlamaVision>(mmproj_path, model);
@@ -140,9 +140,6 @@ std::string LlamaGenerator::generateWithImage(llama_context *ctx, const std::str
     if (prompt.empty()) throw std::runtime_error("generateWithImage(): prompt cannot be empty");
     if (image_bytes.empty()) throw std::invalid_argument("generateWithImage(): image data cannot be empty");
     if (!hasVision()) throw std::runtime_error("generateWithImage(): vision projector not initialized (call initVision first)");
-
-    // Decode image, tokenize prompt with the media marker, evaluate all chunks
-    // (the text tokens come back as a sampler penalty baseline)
     std::vector<llama_token> penalty_baseline = vision->evalPrompt(ctx, prompt, image_bytes);
 
     return runSamplingLoop(ctx, params, on_token, penalty_baseline);

@@ -26,8 +26,6 @@ public:
     
     std::string generate(const std::string& role, const std::string& content, const SamplingParams& params = SamplingParams());
 
-    // Multimodal: appends the message with a media marker, evaluates the image
-    // alongside the text, and generates a response (mirrors generate()).
     std::string generateWithImage(const std::string& role, const std::string& content, const std::vector<uint8_t>& image_bytes, const std::string& mmproj_path, const SamplingParams& params = SamplingParams());
     
     std::string chatToJson() const;
